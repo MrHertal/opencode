@@ -5,6 +5,7 @@ import path from "path"
 import { type ParseError, parse } from "jsonc-parser"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import { Permission } from "@opencode-ai/schema/permission"
+import { Flag } from "./flag/flag"
 import { FSUtil } from "./fs-util"
 import { Global } from "./global"
 import { Location } from "./location"
@@ -174,15 +175,16 @@ const layer = Layer.effect(
     const locationIsGlobal = path.resolve(location.directory) === path.resolve(global.config)
     // Read configuration once when this location opens. Later calls reuse these
     // values until the location is reopened.
-    const discovered = locationIsGlobal
-      ? []
-      : yield* fs
-          .up({
-            targets: [".opencode", ...names.toReversed()],
-            start: location.directory,
-            stop: location.project.directory,
-          })
-          .pipe(Effect.orDie)
+    const discovered =
+      locationIsGlobal || Flag.OPENCODE_DISABLE_PROJECT_CONFIG
+        ? []
+        : yield* fs
+            .up({
+              targets: [".opencode", ...names.toReversed()],
+              start: location.directory,
+              stop: location.project.directory,
+            })
+            .pipe(Effect.orDie)
     const directories = [
       globalDirectory,
       ...discovered
