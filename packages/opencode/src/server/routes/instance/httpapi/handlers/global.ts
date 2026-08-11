@@ -82,6 +82,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const dispose = Effect.fn("GlobalHttpApi.dispose")(function* () {
+      yield* config.invalidate()
       yield* disposeAllInstancesAndEmitGlobalDisposed()
       return true
     })
