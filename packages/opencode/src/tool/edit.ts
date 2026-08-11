@@ -18,6 +18,7 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "@/util/bom"
+import { temporaryPathMetadata } from "./temporary-path"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -205,6 +206,7 @@ export const EditTool = Tool.define(
               diagnostics,
               diff,
               filediff,
+              ...temporaryPathMetadata(filePath),
             },
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
