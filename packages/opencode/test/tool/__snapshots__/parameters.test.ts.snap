@@ -194,6 +194,35 @@ exports[`tool parameters JSON Schema (wire shape) plan 1`] = `
 }
 `;
 
+exports[`tool parameters JSON Schema (wire shape) present_files 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "files": {
+      "description": "The final documents to present to the user",
+      "items": {
+        "properties": {
+          "path": {
+            "description": "The absolute path to a final user-facing document",
+            "type": "string",
+          },
+        },
+        "required": [
+          "path",
+        ],
+        "type": "object",
+      },
+      "minItems": 1,
+      "type": "array",
+    },
+  },
+  "required": [
+    "files",
+  ],
+  "type": "object",
+}
+`;
+
 exports[`tool parameters JSON Schema (wire shape) question 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",

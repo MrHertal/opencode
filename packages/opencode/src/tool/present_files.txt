@@ -1,0 +1,5 @@
+Present final office documents to the user after creating or editing them.
+
+Call this tool only after every file is complete and has passed the validation required by the relevant document workflow. Present only final user-facing outputs, never temporary files, working copies, previews, or validation artifacts.
+
+Supported file types are DOCX, XLSX, PPTX, and PDF. Every path must be absolute.

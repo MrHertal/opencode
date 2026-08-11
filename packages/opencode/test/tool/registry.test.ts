@@ -150,6 +150,13 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("exposes present_files", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      expect(yield* registry.ids()).toContain("present_files")
+    }),
+  )
+
   it.instance("hides task background parameter unless experimental background subagents are enabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

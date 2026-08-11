@@ -16,6 +16,7 @@ import { Parameters as Grep } from "../../src/tool/grep"
 import { Parameters as Invalid } from "../../src/tool/invalid"
 import { Parameters as Lsp } from "../../src/tool/lsp"
 import { Parameters as Plan } from "../../src/tool/plan"
+import { Parameters as PresentFiles } from "../../src/tool/present_files"
 import { Parameters as Question } from "../../src/tool/question"
 import { Parameters as Read } from "../../src/tool/read"
 import { Parameters as Shell } from "../../src/tool/shell"
@@ -44,6 +45,7 @@ describe("tool parameters", () => {
     test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
     test("lsp", () => expect(toJsonSchema(Lsp)).toMatchSnapshot())
     test("plan", () => expect(toJsonSchema(Plan)).toMatchSnapshot())
+    test("present_files", () => expect(toJsonSchema(PresentFiles)).toMatchSnapshot())
     test("question", () => expect(toJsonSchema(Question)).toMatchSnapshot())
     test("read", () => expect(toJsonSchema(Read)).toMatchSnapshot())
     test("skill", () => expect(toJsonSchema(Skill)).toMatchSnapshot())
@@ -192,6 +194,17 @@ describe("tool parameters", () => {
   describe("plan", () => {
     test("accepts empty object", () => {
       expect(parse(Plan, {})).toEqual({})
+    })
+  })
+
+  describe("present_files", () => {
+    test("accepts one or more file paths", () => {
+      expect(parse(PresentFiles, { files: [{ path: "/tmp/report.docx" }] })).toEqual({
+        files: [{ path: "/tmp/report.docx" }],
+      })
+    })
+    test("rejects an empty file list", () => {
+      expect(accepts(PresentFiles, { files: [] })).toBe(false)
     })
   })
 
