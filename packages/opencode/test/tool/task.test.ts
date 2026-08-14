@@ -66,7 +66,7 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
+const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned", system?: string) {
   const session = yield* Session.Service
   const chat = yield* session.create({ title })
   const user = yield* session.updateMessage({
@@ -75,6 +75,7 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     sessionID: chat.id,
     agent: "build",
     model: ref,
+    system,
     time: { created: Date.now() },
   })
   const assistant: SessionV1.Assistant = {
@@ -368,6 +369,70 @@ describe("tool.task", () => {
       expect(failure.message).toBe(
         `Subagent failed (task_id: ${child?.id}): The user rejected permission to use this specific tool call.`,
       )
+    }),
+  )
+
+  it.instance("execute forwards the parent system prompt to the child session", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed("Pinned", "custom kowork prompt")
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.system).toBe("custom kowork prompt")
+    }),
+  )
+
+  it.instance("execute forwards the parent system prompt when resuming a task", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed("Pinned", "custom kowork prompt")
+      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          task_id: child.id,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.sessionID).toBe(child.id)
+      expect(seen?.system).toBe("custom kowork prompt")
     }),
   )
 

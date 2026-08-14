@@ -178,6 +178,13 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
+      // kowork: inherit the parent turn's custom system prompt
+      const user = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: msg.info.parentID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      )
+      const system = user?.info.role === "user" ? user.info.system : undefined
+
       const model = next.model ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
@@ -208,6 +215,7 @@ export const TaskTool = Tool.define(
           },
           variant: next.model ? undefined : variant,
           agent: next.name,
+          system,
           parts,
         })
         if (result.info.role === "assistant" && result.info.error) {
@@ -234,6 +242,7 @@ export const TaskTool = Tool.define(
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
             variant,
+            system,
             parts: [
               {
                 type: "text",
