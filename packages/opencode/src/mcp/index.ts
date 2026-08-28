@@ -7,7 +7,7 @@ import { Client, type ClientOptions } from "@modelcontextprotocol/sdk/client/ind
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
+import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
   ListRootsRequestSchema,
   type LoggingMessageNotification,
@@ -205,7 +205,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const auth = yield* McpAuth.Service
+    const mcpAuth = yield* McpAuth.Service
     const events = yield* EventV2Bridge.Service
     const browser = yield* McpBrowser.Service
 
@@ -249,6 +249,7 @@ const layer = Layer.effect(
       let authProvider: McpOAuthProvider | undefined
 
       if (!oauthDisabled) {
+        const bridge = yield* EffectBridge.make()
         authProvider = new McpOAuthProvider(
           key,
           mcp.url,
@@ -260,9 +261,36 @@ const layer = Layer.effect(
             redirectUri: oauthConfig?.redirectUri,
           },
           {
-            onRedirect: async () => {},
+            // Google Workspace MCP servers enforce auth lazily (anonymous
+            // initialize/tools/list; 401 only on tools/call), so a redirect can
+            // fire on a connected client. Park the transport and flip back to
+            // needs_auth so the auth flow can be restarted instead of failing
+            // every tool call. Forked: during initial connect the state lookup
+            // is still in-flight, and the connect error path handles that case.
+            onRedirect: () => {
+              bridge.fork(
+                Effect.gen(function* () {
+                  if (!(yield* InstanceState.has(state))) return
+                  const s = yield* InstanceState.get(state)
+                  if (s.status[key]?.status !== "connected") return
+                  const transport = s.clients[key]?.transport
+                  if (transport instanceof StreamableHTTPClientTransport || transport instanceof SSEClientTransport) {
+                    pendingOAuthTransports.set(key, { transport })
+                  }
+                  s.status[key] = { status: "needs_auth" }
+                  yield* events
+                    .publish(TuiEvent.ToastShow, {
+                      title: "MCP Authentication Required",
+                      message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
+                      variant: "warning",
+                      duration: 8000,
+                    })
+                    .pipe(Effect.ignore)
+                }),
+              )
+            },
           },
-          auth,
+          mcpAuth,
         )
       }
 
@@ -326,7 +354,17 @@ const layer = Layer.effect(
             return Effect.void
           }),
         )
-        if (result) return { client: result.client, status: { status: "connected" } as Status }
+        if (result) {
+          // Google Workspace MCP servers enforce auth lazily (anonymous
+          // initialize/tools/list; 401 only on tools/call), so a successful
+          // connect does not prove authorization. When a clientId is
+          // configured but no tokens are stored, auth is still required.
+          if (oauthConfig?.clientId && !(yield* mcpAuth.getForUrl(key, mcp.url))?.tokens) {
+            yield* Effect.tryPromise(() => result.client.close()).pipe(Effect.ignore)
+            return { client: undefined as MCPClient | undefined, status: { status: "needs_auth" } as Status }
+          }
+          return { client: result.client, status: { status: "connected" } as Status }
+        }
         // If this was an auth error, stop trying other transports
         if (lastStatus?.status === "needs_auth" || lastStatus?.status === "needs_client_registration") break
       }
@@ -824,7 +862,7 @@ const layer = Layer.effect(
       const oauthState = Array.from(crypto.getRandomValues(new Uint8Array(32)))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("")
-      yield* auth.updateOAuthState(mcpName, oauthState)
+      yield* mcpAuth.updateOAuthState(mcpName, oauthState)
       let capturedUrl: URL | undefined
       const authProvider = new McpOAuthPendingProvider(
         mcpName,
@@ -840,13 +878,30 @@ const layer = Layer.effect(
             capturedUrl = url
           },
         },
-        auth,
+        mcpAuth,
       )
 
       const transport = new StreamableHTTPClientTransport(url, {
         authProvider,
         requestInit: mcpConfig.headers ? { headers: mcpConfig.headers } : undefined,
       })
+
+      // Google Workspace MCP servers enforce auth lazily (anonymous
+      // initialize/tools/list; 401 only on tools/call), so connect() never
+      // surfaces a 401 to trigger OAuth. With a configured clientId, start the
+      // flow explicitly instead of waiting for a 401 that never comes. The
+      // pre-saved oauthState above is what auth() reads back via the provider.
+      if (oauthConfig?.clientId) {
+        const result = yield* Effect.tryPromise({
+          try: () => auth(authProvider, { serverUrl: url }),
+          catch: (error) => error,
+        }).pipe(Effect.orDie)
+        if (result === "REDIRECT" && capturedUrl) {
+          pendingOAuthTransports.set(mcpName, { transport, provider: authProvider })
+          return { authorizationUrl: capturedUrl.toString(), oauthState } satisfies AuthResult
+        }
+      }
+
       const directory = yield* InstanceState.directory
 
       return yield* Effect.tryPromise({
@@ -891,7 +946,7 @@ const layer = Layer.effect(
         }
 
         const s = yield* InstanceState.get(state)
-        yield* auth.clearOAuthState(mcpName)
+        yield* mcpAuth.clearOAuthState(mcpName)
         return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
       }
 
@@ -906,12 +961,12 @@ const layer = Layer.effect(
 
       const code = yield* Effect.promise(() => callbackPromise)
 
-      const storedState = yield* auth.getOAuthState(mcpName)
+      const storedState = yield* mcpAuth.getOAuthState(mcpName)
       if (storedState !== result.oauthState) {
-        yield* auth.clearOAuthState(mcpName)
+        yield* mcpAuth.clearOAuthState(mcpName)
         throw new Error("OAuth state mismatch - potential CSRF attack")
       }
-      yield* auth.clearOAuthState(mcpName)
+      yield* mcpAuth.clearOAuthState(mcpName)
       return yield* finishAuth(mcpName, code)
     })
 
@@ -933,7 +988,7 @@ const layer = Layer.effect(
       if (error) return { status: "failed", error: `OAuth completion failed: ${error}` } satisfies Status
 
       yield* Effect.promise(() => pending.provider?.commit() ?? Promise.resolve())
-      yield* auth.clearCodeVerifier(mcpName)
+      yield* mcpAuth.clearCodeVerifier(mcpName)
       pendingOAuthTransports.delete(mcpName)
 
       const mcpConfig = yield* requireMcpConfig(mcpName)
@@ -942,7 +997,7 @@ const layer = Layer.effect(
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
-      yield* auth.remove(mcpName)
+      yield* mcpAuth.remove(mcpName)
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
     })
@@ -953,7 +1008,7 @@ const layer = Layer.effect(
     })
 
     const hasStoredTokens = Effect.fn("MCP.hasStoredTokens")(function* (mcpName: string) {
-      const entry = yield* auth.get(mcpName)
+      const entry = yield* mcpAuth.get(mcpName)
       return !!entry?.tokens
     })
 
@@ -963,7 +1018,7 @@ const layer = Layer.effect(
         : undefined
       const mcpConfig = runtimeConfig ?? (yield* cfgSvc.get()).mcp?.[mcpName]
       if (!mcpConfig || !isMcpConfigured(mcpConfig) || mcpConfig.type !== "remote") return "not_authenticated"
-      const entry = yield* auth.getForUrl(mcpName, mcpConfig.url)
+      const entry = yield* mcpAuth.getForUrl(mcpName, mcpConfig.url)
       if (!entry?.tokens) return "not_authenticated"
       if (entry.tokens.expiresAt && entry.tokens.expiresAt < Date.now() / 1000) return "expired"
       return "authenticated"

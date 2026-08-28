@@ -1,7 +1,12 @@
 import { expect } from "bun:test"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
-import { ListResourcesRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import {
+  CallToolRequestSchema,
+  CallToolResultSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -22,36 +27,44 @@ const mcpTest = testEffect(
 
 interface OAuthMcpOptions {
   capabilities?: "tools" | "resources"
+  // Google Workspace MCP servers enforce auth lazily (anonymous
+  // initialize/tools/list; 401 only on tools/call).
+  lazyAuth?: boolean
 }
 
 function serveOAuthMcp(options: OAuthMcpOptions = {}) {
   return Effect.acquireRelease(
     Effect.promise(async () => {
       const capabilities = options.capabilities ?? "tools"
-      const protocol = new Server(
-        { name: "oauth-auto-connect", version: "1.0.0" },
-        { capabilities: capabilities === "tools" ? { tools: {} } : { resources: {} } },
-      )
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: () => crypto.randomUUID(),
-        enableJsonResponse: true,
-      })
       let listToolsCalls = 0
       let requiresAuth = true
 
-      if (capabilities === "tools") {
-        protocol.setRequestHandler(ListToolsRequestSchema, () => {
-          listToolsCalls++
-          return Promise.resolve({ tools: [{ name: "test_tool", inputSchema: { type: "object" } }] })
-        })
-      }
-      if (capabilities === "resources") {
-        protocol.setRequestHandler(ListResourcesRequestSchema, () =>
-          Promise.resolve({ resources: [{ name: "docs", uri: "docs://readme" }] }),
+      const createProtocol = () => {
+        const protocol = new Server(
+          { name: "oauth-auto-connect", version: "1.0.0" },
+          { capabilities: capabilities === "tools" ? { tools: {} } : { resources: {} } },
         )
+        if (capabilities === "tools") {
+          protocol.setRequestHandler(ListToolsRequestSchema, () => {
+            listToolsCalls++
+            return Promise.resolve({ tools: [{ name: "test_tool", inputSchema: { type: "object" } }] })
+          })
+          protocol.setRequestHandler(CallToolRequestSchema, () =>
+            Promise.resolve({ content: [{ type: "text", text: "ok" }] }),
+          )
+        }
+        if (capabilities === "resources") {
+          protocol.setRequestHandler(ListResourcesRequestSchema, () =>
+            Promise.resolve({ resources: [{ name: "docs", uri: "docs://readme" }] }),
+          )
+        }
+        return protocol
       }
 
-      await protocol.connect(transport)
+      // One SDK Server accepts a single initialize, so model each MCP session
+      // with its own Server + transport pair, keyed by mcp-session-id.
+      const sessions = new Map<string, { protocol: Server; transport: WebStandardStreamableHTTPServerTransport }>()
+
       const http = Bun.serve({
         port: 0,
         async fetch(request) {
@@ -102,18 +115,58 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
           }
           if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 })
 
-          if (request.method === "GET") return new Response(null, { status: 405 })
-          if (requiresAuth && request.headers.get("authorization") !== "Bearer replacement-token") {
-            return new Response("Unauthorized", {
+          const unauthorized = () =>
+            new Response("Unauthorized", {
               status: 401,
               headers: {
                 "WWW-Authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="mcp"`,
               },
             })
+
+          if (request.method === "GET") return new Response(null, { status: 405 })
+          if (requiresAuth && request.headers.get("authorization") !== "Bearer replacement-token") {
+            if (!options.lazyAuth) return unauthorized()
+            // Lazy auth: only tools/call is rejected, everything else passes
+            // anonymously. The body is re-read because request.text() consumes it.
+            const body = await request.text()
+            const callsTool = (() => {
+              try {
+                const parsed: unknown = JSON.parse(body)
+                const messages = Array.isArray(parsed) ? parsed : [parsed]
+                return messages.some(
+                  (msg) =>
+                    typeof msg === "object" && msg !== null && (msg as { method?: string }).method === "tools/call",
+                )
+              } catch {
+                return false
+              }
+            })()
+            if (callsTool) return unauthorized()
+            const recreated = new Request(request.url, { method: request.method, headers: request.headers, body })
+            const session = await sessionFor(recreated)
+            return session.transport.handleRequest(recreated)
           }
-          return transport.handleRequest(request)
+          const session = await sessionFor(request)
+          return session.transport.handleRequest(request)
         },
       })
+
+      function sessionFor(request: Request) {
+        const existing = sessions.get(request.headers.get("mcp-session-id") ?? "")
+        if (existing) return Promise.resolve(existing)
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          enableJsonResponse: true,
+          onsessioninitialized: (id) => {
+            sessions.set(id, session)
+          },
+          onsessionclosed: (id) => {
+            sessions.delete(id)
+          },
+        })
+        const session = { protocol: createProtocol(), transport }
+        return session.protocol.connect(transport).then(() => session)
+      }
 
       return {
         url: new URL("/mcp", http.url).toString(),
@@ -123,7 +176,7 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
         listToolsCalls: () => listToolsCalls,
         close: async () => {
           await http.stop(true)
-          await protocol.close()
+          await Promise.all([...sessions.values()].map((session) => session.protocol.close()))
         },
       }
     }),
@@ -296,5 +349,59 @@ mcpTest.instance("authenticate() connects a resource-only server without listing
     expect((yield* mcp.authenticate(name)).status).toBe("connected")
     expect(server.listToolsCalls()).toBe(0)
     expect(Object.keys(yield* mcp.resources())).toEqual([`${name}:docs://readme`])
+  }),
+)
+
+mcpTest.instance("lazy-auth server with configured clientId reports needs_auth after anonymous connect", () =>
+  Effect.gen(function* () {
+    const server = yield* serveOAuthMcp({ lazyAuth: true })
+    const mcp = yield* MCP.Service
+    const name = "test-lazy-auth"
+    const added = yield* mcp.add(name, {
+      type: "remote",
+      url: server.url,
+      enabled: true,
+      oauth: { clientId: "pre-registered-client" },
+    })
+
+    expect((added.status as Record<string, { status: string }>)[name]).toEqual({ status: "needs_auth" })
+  }),
+)
+
+mcpTest.instance("startAuth initiates OAuth proactively for a lazy-auth server with configured clientId", () =>
+  Effect.gen(function* () {
+    yield* stopOAuthCallback
+    const server = yield* serveOAuthMcp({ lazyAuth: true })
+    const mcp = yield* MCP.Service
+    const auth = yield* McpAuth.Service
+    const name = "test-lazy-auth-flow"
+
+    const added = yield* mcp.add(name, {
+      type: "remote",
+      url: server.url,
+      enabled: true,
+      oauth: { clientId: "pre-registered-client" },
+    })
+    expect((added.status as Record<string, { status: string }>)[name]?.status).toBe("needs_auth")
+
+    const started = yield* mcp.startAuth(name)
+    expect(started.authorizationUrl).toContain("/authorize")
+    expect(started.oauthState).toHaveLength(64)
+    expect(new URL(started.authorizationUrl).searchParams.get("state")).toBe(started.oauthState)
+
+    expect((yield* mcp.finishAuth(name, "valid-code")).status).toBe("connected")
+    const entry = yield* auth.get(name)
+    expect(entry?.tokens?.accessToken).toBe("replacement-token")
+    expect(entry?.serverUrl).toBe(server.url)
+    expect((yield* mcp.status())[name]?.status).toBe("connected")
+
+    // The stored token is attached to tool calls, passing the lazy 401.
+    const tools = yield* mcp.tools()
+    const tool = tools[`${name}_test_tool`]
+    expect(tool).toBeDefined()
+    const called = yield* Effect.promise(() =>
+      tool.client.callTool({ name: "test_tool", arguments: {} }, CallToolResultSchema),
+    )
+    expect(called.content).toEqual([{ type: "text", text: "ok" }])
   }),
 )
