@@ -239,6 +239,27 @@ export class McpOAuthPendingProvider extends McpOAuthProvider {
 
 export { OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH }
 
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"])
+
+/**
+ * URI the local OAuth callback server should bind for the given config. A
+ * non-loopback redirectUri (e.g. an HTTPS relay that forwards the callback
+ * back to loopback) is advertised to the authorization server as-is, but the
+ * local server keeps listening on the loopback callback address — parsing an
+ * HTTPS URI for bind config would map it to port 443.
+ */
+export function localCallbackUri(config: Pick<McpOAuthConfig, "redirectUri" | "callbackPort">): string | undefined {
+  const loopbackUri = config.callbackPort ? `http://127.0.0.1:${config.callbackPort}${OAUTH_CALLBACK_PATH}` : undefined
+  if (!config.redirectUri) return loopbackUri
+  try {
+    const url = new URL(config.redirectUri)
+    if (url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname)) return config.redirectUri
+  } catch {
+    // Unparseable URIs bind the loopback defaults, same as parseRedirectUri
+  }
+  return loopbackUri
+}
+
 /**
  * Parse a redirect URI to extract port and path for the callback server.
  * Returns defaults if the URI can't be parsed.

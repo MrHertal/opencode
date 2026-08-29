@@ -1,6 +1,11 @@
 import { test, expect, describe } from "bun:test"
 import { determineScope } from "@modelcontextprotocol/sdk/client/auth.js"
-import { McpOAuthProvider, OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH } from "../../src/mcp/oauth-provider"
+import {
+  McpOAuthProvider,
+  OAUTH_CALLBACK_PORT,
+  OAUTH_CALLBACK_PATH,
+  localCallbackUri,
+} from "../../src/mcp/oauth-provider"
 import type { McpAuth } from "../../src/mcp/auth"
 
 // Stub auth — only synchronous getters are exercised in these tests
@@ -31,6 +36,55 @@ describe("McpOAuthProvider.redirectUrl", () => {
   test("uses explicit redirectUri when set without callbackPort", () => {
     const provider = makeProvider({ redirectUri: "http://127.0.0.1:8080/oauth/callback" })
     expect(provider.redirectUrl).toBe("http://127.0.0.1:8080/oauth/callback")
+  })
+})
+
+describe("localCallbackUri", () => {
+  test("returns undefined without config so the callback server binds defaults", () => {
+    expect(localCallbackUri({})).toBeUndefined()
+  })
+
+  test("uses callbackPort shorthand when no redirectUri is set", () => {
+    expect(localCallbackUri({ callbackPort: 6620 })).toBe(`http://127.0.0.1:6620${OAUTH_CALLBACK_PATH}`)
+  })
+
+  test("passes through a loopback http redirectUri", () => {
+    expect(localCallbackUri({ redirectUri: "http://127.0.0.1:9999/custom/callback" })).toBe(
+      "http://127.0.0.1:9999/custom/callback",
+    )
+  })
+
+  test("passes through localhost and IPv6 loopback redirect URIs", () => {
+    expect(localCallbackUri({ redirectUri: "http://localhost:9999/custom/callback" })).toBe(
+      "http://localhost:9999/custom/callback",
+    )
+    expect(localCallbackUri({ redirectUri: "http://[::1]:9999/custom/callback" })).toBe(
+      "http://[::1]:9999/custom/callback",
+    )
+  })
+
+  test("loopback redirectUri takes precedence over callbackPort", () => {
+    expect(localCallbackUri({ redirectUri: "http://127.0.0.1:9999/custom/callback", callbackPort: 6620 })).toBe(
+      "http://127.0.0.1:9999/custom/callback",
+    )
+  })
+
+  test("https redirectUri falls back to the loopback defaults", () => {
+    expect(localCallbackUri({ redirectUri: "https://kowork.dev/mcp/oauth/callback" })).toBeUndefined()
+  })
+
+  test("https redirectUri with callbackPort binds the callbackPort on loopback", () => {
+    expect(localCallbackUri({ redirectUri: "https://kowork.dev/mcp/oauth/callback", callbackPort: 6620 })).toBe(
+      `http://127.0.0.1:6620${OAUTH_CALLBACK_PATH}`,
+    )
+  })
+
+  test("non-loopback http redirectUri falls back to the loopback defaults", () => {
+    expect(localCallbackUri({ redirectUri: "http://192.168.1.10:8080/callback" })).toBeUndefined()
+  })
+
+  test("invalid redirectUri falls back to the loopback defaults", () => {
+    expect(localCallbackUri({ redirectUri: "not-a-valid-url" })).toBeUndefined()
   })
 })
 

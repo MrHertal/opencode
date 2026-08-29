@@ -16,7 +16,12 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { McpAuth } from "../../src/mcp/auth"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
-import { McpOAuthPendingProvider, McpOAuthProvider } from "../../src/mcp/oauth-provider"
+import {
+  McpOAuthPendingProvider,
+  McpOAuthProvider,
+  OAUTH_CALLBACK_PATH,
+  OAUTH_CALLBACK_PORT,
+} from "../../src/mcp/oauth-provider"
 import { testEffect } from "../lib/effect"
 
 const mcpTest = testEffect(
@@ -349,6 +354,37 @@ mcpTest.instance("authenticate() connects a resource-only server without listing
     expect((yield* mcp.authenticate(name)).status).toBe("connected")
     expect(server.listToolsCalls()).toBe(0)
     expect(Object.keys(yield* mcp.resources())).toEqual([`${name}:docs://readme`])
+  }),
+)
+
+mcpTest.instance("startAuth with a remote redirectUri advertises it but keeps the loopback callback server", () =>
+  Effect.gen(function* () {
+    yield* stopOAuthCallback
+    const server = yield* serveOAuthMcp()
+    const mcp = yield* MCP.Service
+    const name = "test-remote-redirect"
+    const redirectUri = "https://relay.kowork.dev/mcp/oauth/callback"
+
+    yield* mcp.add(name, { type: "remote", url: server.url, enabled: true, oauth: { redirectUri } })
+
+    const started = yield* mcp.startAuth(name)
+    const authorizationUrl = new URL(started.authorizationUrl)
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(redirectUri)
+
+    // The HTTPS relay forwards the browser back to the default loopback
+    // callback address, so the local server must answer there — not on the
+    // port parsed from the remote URI (443 for HTTPS).
+    const callback = McpOAuthCallback.waitForCallback(started.oauthState, name)
+    const response = yield* Effect.promise(() =>
+      fetch(
+        `http://127.0.0.1:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}?code=valid-code&state=${started.oauthState}`,
+      ),
+    )
+    expect(response.status).toBe(200)
+    expect(yield* Effect.promise(() => callback)).toBe("valid-code")
+
+    expect((yield* mcp.finishAuth(name, "valid-code")).status).toBe("connected")
+    expect((yield* mcp.status())[name]?.status).toBe("connected")
   }),
 )
 
