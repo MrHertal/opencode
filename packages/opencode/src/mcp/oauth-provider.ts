@@ -11,6 +11,14 @@ import { McpAuth } from "./auth"
 const OAUTH_CALLBACK_PORT = 19876
 const OAUTH_CALLBACK_PATH = "/mcp/oauth/callback"
 
+// Extra authorization parameters some providers require to issue (and
+// re-issue) refresh tokens; the MCP SDK has no hook for them.
+const AUTHORIZATION_PARAMS: Record<string, Record<string, string>> = {
+  // Google only issues refresh tokens with access_type=offline, and re-issues
+  // one only with forced consent.
+  "accounts.google.com": { access_type: "offline", prompt: "consent" },
+}
+
 export interface McpOAuthConfig {
   clientId?: string
   clientSecret?: string
@@ -125,6 +133,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    for (const [key, value] of Object.entries(AUTHORIZATION_PARAMS[authorizationUrl.hostname] ?? {})) {
+      authorizationUrl.searchParams.set(key, value)
+    }
     await this.callbacks.onRedirect(authorizationUrl)
   }
 

@@ -32,9 +32,11 @@ const mcpTest = testEffect(
 
 interface OAuthMcpOptions {
   capabilities?: "tools" | "resources"
-  // Google Workspace MCP servers enforce auth lazily (anonymous
-  // initialize/tools/list; 401 only on tools/call).
+  // Some MCP servers, such as Google Workspace, enforce auth lazily
+  // (anonymous initialize/tools/list; 401 only on tools/call).
   lazyAuth?: boolean
+  // Token that gets a 401 on tools/list while initialize passes anonymously.
+  staleToken?: string
 }
 
 function serveOAuthMcp(options: OAuthMcpOptions = {}) {
@@ -132,21 +134,22 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
           if (requiresAuth && request.headers.get("authorization") !== "Bearer replacement-token") {
             if (!options.lazyAuth) return unauthorized()
             // Lazy auth: only tools/call is rejected, everything else passes
-            // anonymously. The body is re-read because request.text() consumes it.
+            // anonymously; a stale token additionally fails tools/list. The
+            // body is re-read because request.text() consumes it.
             const body = await request.text()
-            const callsTool = (() => {
+            const methods = (() => {
               try {
                 const parsed: unknown = JSON.parse(body)
-                const messages = Array.isArray(parsed) ? parsed : [parsed]
-                return messages.some(
-                  (msg) =>
-                    typeof msg === "object" && msg !== null && (msg as { method?: string }).method === "tools/call",
+                return (Array.isArray(parsed) ? parsed : [parsed]).map((msg) =>
+                  typeof msg === "object" && msg !== null ? (msg as { method?: string }).method : undefined,
                 )
               } catch {
-                return false
+                return []
               }
             })()
-            if (callsTool) return unauthorized()
+            const stale = options.staleToken && request.headers.get("authorization") === `Bearer ${options.staleToken}`
+            const rejected = methods.some((method) => method === "tools/call" || (stale && method === "tools/list"))
+            if (rejected) return unauthorized()
             const recreated = new Request(request.url, { method: request.method, headers: request.headers, body })
             const session = await sessionFor(recreated)
             return session.transport.handleRequest(recreated)
@@ -439,5 +442,30 @@ mcpTest.instance("startAuth initiates OAuth proactively for a lazy-auth server w
       tool.client.callTool({ name: "test_tool", arguments: {} }, CallToolResultSchema),
     )
     expect(called.content).toEqual([{ type: "text", text: "ok" }])
+  }),
+)
+
+mcpTest.instance("stale stored tokens on a lazy-auth server report needs_auth instead of failed", () =>
+  Effect.gen(function* () {
+    const server = yield* serveOAuthMcp({ lazyAuth: true, staleToken: "stale-token" })
+    const mcp = yield* MCP.Service
+    const auth = yield* McpAuth.Service
+    const name = "test-stale-token"
+
+    // The stored token passes the pre-connect check but is rejected, with no
+    // refresh token to recover.
+    yield* auth.updateTokens(name, { accessToken: "stale-token" }, server.url)
+
+    const added = yield* mcp.add(name, {
+      type: "remote",
+      url: server.url,
+      enabled: true,
+      oauth: { clientId: "pre-registered-client" },
+    })
+    expect((added.status as Record<string, { status: string }>)[name]).toEqual({ status: "needs_auth" })
+
+    // Reconnecting (the UI's Retry path) must land on needs_auth again.
+    yield* mcp.connect(name)
+    expect((yield* mcp.status())[name]).toEqual({ status: "needs_auth" })
   }),
 )

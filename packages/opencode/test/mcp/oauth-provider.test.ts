@@ -115,6 +115,48 @@ describe("McpOAuthProvider.clientMetadata", () => {
   })
 })
 
+describe("McpOAuthProvider.redirectToAuthorization", () => {
+  test("requests offline access from Google so a refresh token is issued", async () => {
+    let redirected: URL | undefined
+    const provider = new McpOAuthProvider(
+      "test-server",
+      "https://calendarmcp.googleapis.com/mcp/v1",
+      {},
+      {
+        onRedirect: async (url) => {
+          redirected = url
+        },
+      },
+      stubAuth,
+    )
+
+    await provider.redirectToAuthorization(new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=x"))
+
+    expect(redirected?.searchParams.get("access_type")).toBe("offline")
+    expect(redirected?.searchParams.get("prompt")).toBe("consent")
+    expect(redirected?.searchParams.get("client_id")).toBe("x")
+  })
+
+  test("leaves non-Google authorization URLs untouched", async () => {
+    let redirected: URL | undefined
+    const provider = new McpOAuthProvider(
+      "test-server",
+      "https://mcp.example.com/mcp",
+      {},
+      {
+        onRedirect: async (url) => {
+          redirected = url
+        },
+      },
+      stubAuth,
+    )
+
+    await provider.redirectToAuthorization(new URL("https://mcp.example.com/authorize?client_id=x"))
+
+    expect(redirected?.toString()).toBe("https://mcp.example.com/authorize?client_id=x")
+  })
+})
+
 describe("MCP OAuth scope selection", () => {
   test("adds offline_access when the authorization server and client support refresh tokens", () => {
     expect(

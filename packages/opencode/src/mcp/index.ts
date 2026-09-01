@@ -261,7 +261,7 @@ const layer = Layer.effect(
             redirectUri: oauthConfig?.redirectUri,
           },
           {
-            // Google Workspace MCP servers enforce auth lazily (anonymous
+            // Some MCP servers, such as Google Workspace, enforce auth lazily (anonymous
             // initialize/tools/list; 401 only on tools/call), so a redirect can
             // fire on a connected client. Park the transport and flip back to
             // needs_auth so the auth flow can be restarted instead of failing
@@ -355,7 +355,7 @@ const layer = Layer.effect(
           }),
         )
         if (result) {
-          // Google Workspace MCP servers enforce auth lazily (anonymous
+          // Some MCP servers, such as Google Workspace, enforce auth lazily (anonymous
           // initialize/tools/list; 401 only on tools/call), so a successful
           // connect does not prove authorization. When a clientId is
           // configured but no tokens are stored, auth is still required.
@@ -427,9 +427,6 @@ const layer = Layer.effect(
 
         return yield* Effect.gen(function* () {
           const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
-          if (!listed) {
-            return yield* Effect.fail(new Error("Failed to get tools"))
-          }
           return {
             mcpClient,
             status,
@@ -437,6 +434,18 @@ const layer = Layer.effect(
             instructions: mcpClient.getInstructions()?.trim(),
           } satisfies CreateResult
         }).pipe(
+          Effect.catch((error) => {
+            // Lazily-authorizing servers (e.g. Google Workspace) can surface
+            // the first 401 here. The SDK already tried refreshing, so the
+            // user must sign in again — a retry would fail identically.
+            const reauth = mcp.type === "remote" && mcp.oauth !== false && error instanceof UnauthorizedError
+            return Effect.tryPromise(() => mcpClient.close()).pipe(
+              Effect.ignore,
+              Effect.as<CreateResult>({
+                status: reauth ? { status: "needs_auth" } : { status: "failed", error: "Failed to get tools" },
+              }),
+            )
+          }),
           Effect.catchCause((cause) =>
             Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore, Effect.andThen(Effect.failCause(cause))),
           ),
@@ -500,7 +509,7 @@ const layer = Layer.effect(
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
-        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
+        const listed = await bridge.promise(McpCatalog.defs(client, timeout).pipe(Effect.catch(() => Effect.void)))
         if (!listed) return
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
@@ -888,7 +897,7 @@ const layer = Layer.effect(
         requestInit: mcpConfig.headers ? { headers: mcpConfig.headers } : undefined,
       })
 
-      // Google Workspace MCP servers enforce auth lazily (anonymous
+      // Some MCP servers, such as Google Workspace, enforce auth lazily (anonymous
       // initialize/tools/list; 401 only on tools/call), so connect() never
       // surfaces a 401 to trigger OAuth. With a configured clientId, start the
       // flow explicitly instead of waiting for a 401 that never comes. The
@@ -939,7 +948,7 @@ const layer = Layer.effect(
 
         const listed = client
           ? client.getServerCapabilities()?.tools
-            ? yield* McpCatalog.defs(client, mcpConfig.timeout)
+            ? yield* McpCatalog.defs(client, mcpConfig.timeout).pipe(Effect.catch(() => Effect.void))
             : []
           : undefined
         if (!client || !listed) {
