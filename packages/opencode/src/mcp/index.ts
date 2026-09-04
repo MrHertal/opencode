@@ -904,7 +904,9 @@ const layer = Layer.effect(
       // pre-saved oauthState above is what auth() reads back via the provider.
       if (oauthConfig?.clientId) {
         const result = yield* Effect.tryPromise({
-          try: () => auth(authProvider, { serverUrl: url }),
+          // Pin the configured scope: the SDK otherwise requests every scope
+          // the resource server advertises via scopes_supported.
+          try: () => auth(authProvider, { serverUrl: url, scope: oauthConfig?.scope }),
           catch: (error) => error,
         }).pipe(Effect.orDie)
         if (result === "REDIRECT" && capturedUrl) {
